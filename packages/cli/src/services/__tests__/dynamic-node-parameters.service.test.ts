@@ -1,11 +1,13 @@
 import { Logger } from '@n8n/backend-common';
 import { OutboundHttp } from '@n8n/backend-network';
-import type { HttpRequestClient } from '@n8n/backend-network';
+import type { HttpRequestClient, SsrfProtectionService } from '@n8n/backend-network';
+import type { SsrfProtectionConfig } from '@n8n/config';
 import { mockInstance } from '@n8n/backend-test-utils';
 import { CredentialsRepository, SharedWorkflowRepository } from '@n8n/db';
 import type { CredentialsEntity, Project } from '@n8n/db';
 import type { User } from '@n8n/db';
 import { Container } from '@n8n/di';
+import nock from 'nock';
 import { RoutingNode } from 'n8n-core';
 import {
 	type ILoadOptionsFunctions,
@@ -389,6 +391,120 @@ describe('DynamicNodeParametersService', () => {
 	});
 
 	describe('getOptionsViaLoadOptions', () => {
+		it.each([false, true])(
+			'loads options through the real router when the description is inherited: %s',
+			async (inherited) => {
+				const { RoutingNode: RealRoutingNode } =
+					await vi.importActual<typeof import('n8n-core')>('n8n-core');
+				vi.mocked(RoutingNode).mockImplementation(function (context, nodeType) {
+					return new RealRoutingNode(context, nodeType);
+				});
+				const originalDescription: INodeType['description'] = {
+					name: 'TestNode',
+					displayName: 'Test Node',
+					group: [],
+					version: 1,
+					defaults: {},
+					inputs: [],
+					outputs: [],
+					properties: [],
+					requestDefaults: {
+						baseURL: 'https://api.example.com',
+						headers: { 'X-Test-Node': 'base' },
+					},
+				};
+				const description: INodeType['description'] = inherited
+					? (Object.create(originalDescription) as INodeType['description'])
+					: originalDescription;
+				nodeTypes.getByNameAndVersion.mockReturnValue({ description });
+				vi.spyOn(Expression.prototype, 'acquireIsolate').mockResolvedValue(true);
+				vi.spyOn(Expression.prototype, 'releaseIsolate').mockResolvedValue(undefined);
+				const previousHttp = Container.get(OutboundHttp);
+				Container.set(
+					OutboundHttp,
+					new OutboundHttp(
+						mock<SsrfProtectionService>(),
+						mock<SsrfProtectionConfig>({ enabled: false }),
+						logger,
+					),
+				);
+				const options = [{ name: 'opt', value: 'v' }];
+				const endpoint = nock('https://api.example.com', {
+					reqheaders: { 'X-Test-Node': 'base' },
+				})
+					.get('/v1/models')
+					.reply(200, options);
+				try {
+					const loadedOptions = await service.getOptionsViaLoadOptions(
+						{ routing: { request: { url: '/v1/models', method: 'GET' } } },
+						mock<IWorkflowExecuteAdditionalData>({
+							executionId: 'test-execution',
+							webhookWaitingBaseUrl: 'https://n8n.example.test/webhook-waiting',
+							formWaitingBaseUrl: 'https://n8n.example.test/form-waiting',
+							executionContext: undefined,
+						}),
+						{ name: 'TestNode', version: 1 },
+						{},
+					);
+					expect(loadedOptions).toEqual(options);
+					expect(endpoint.isDone()).toBe(true);
+				} finally {
+					Container.set(OutboundHttp, previousHttp);
+					nock.cleanAll();
+				}
+			},
+		);
+
+		it.each([false, true])(
+			'preserves node settings when the description is inherited: %s',
+			async (inherited) => {
+				const originalDescription: INodeType['description'] = {
+					name: 'TestNode',
+					displayName: 'Test Node',
+					group: [],
+					version: 1,
+					defaults: {},
+					inputs: [],
+					outputs: [],
+					properties: [{ displayName: 'Original', name: 'original', type: 'string', default: '' }],
+					requestDefaults: {
+						baseURL: 'https://api.example.com',
+						headers: { Accept: 'application/json' },
+					},
+					credentials: [{ name: 'testApi', required: true }],
+				};
+				const description: INodeType['description'] = inherited
+					? (Object.create(originalDescription) as INodeType['description'])
+					: originalDescription;
+				nodeTypes.getByNameAndVersion.mockReturnValue({ description });
+				const runNode = vi.fn().mockResolvedValue([[{ json: { name: 'opt', value: 'v' } }]]);
+				vi.mocked(RoutingNode).mockImplementation(function () {
+					return mock<RoutingNode>({ runNode });
+				});
+				vi.spyOn(Expression.prototype, 'acquireIsolate').mockResolvedValue(true);
+				vi.spyOn(Expression.prototype, 'releaseIsolate').mockResolvedValue(undefined);
+				const routing = { request: { url: '/v1/models', method: 'GET' as const } };
+
+				const options = await service.getOptionsViaLoadOptions(
+					{ routing },
+					mock<IWorkflowExecuteAdditionalData>(),
+					{ name: 'TestNode', version: 1 },
+					{},
+				);
+
+				const temporaryNode = vi.mocked(RoutingNode).mock.calls[0][1];
+				expect(options).toEqual([{ name: 'opt', value: 'v' }]);
+				expect(temporaryNode.description.requestDefaults).toBe(originalDescription.requestDefaults);
+				expect(temporaryNode.description.credentials).toBe(originalDescription.credentials);
+				expect(temporaryNode.description.name).toBe(originalDescription.name);
+				expect(temporaryNode.description.properties).toEqual([
+					{ displayName: '', type: 'string', name: '', default: '', routing },
+				]);
+				expect(description.properties).toBe(originalDescription.properties);
+				expect(description.properties[0].name).toBe('original');
+			},
+		);
+
 		it('should throw BadRequestError when the node type has no requestDefaults.baseURL', async () => {
 			nodeTypes.getByNameAndVersion.mockReturnValue(
 				mock<INodeType>({

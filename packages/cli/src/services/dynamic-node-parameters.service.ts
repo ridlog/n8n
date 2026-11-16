@@ -269,6 +269,8 @@ export class DynamicNodeParametersService {
 				},
 			},
 		};
+		// Synthetic tools inherit settings that object spread does not copy.
+		Object.setPrototypeOf(tempNodeType.description, Object.getPrototypeOf(nodeType.description));
 
 		const inputData: ITaskDataConnections = {
 			main: [[{ json: {} }]],
