@@ -132,6 +132,40 @@ describe('Test Discord > prepareEmbeds', () => {
 			},
 		]);
 	});
+
+	it.each(['image', 'thumbnail', 'video'])('should preserve a JSON %s object', (field) => {
+		const media = {
+			url: 'https://example.com/media.png',
+			proxy_url: 'https://example.com/proxy.png',
+			width: 640,
+			height: 480,
+		};
+		const embed = { title: 'Media embed', [field]: media };
+
+		const result = prepareEmbeds.call(executeFunction, [
+			{ inputMethod: 'json', json: JSON.stringify(embed) },
+		]);
+
+		expect(result).toEqual([embed]);
+	});
+
+	it.each(['image', 'thumbnail', 'video'])(
+		'should still normalize a string %s from the field editor',
+		(field) => {
+			const url = 'https://example.com/media.png';
+
+			const result = prepareEmbeds.call(executeFunction, [{ [field]: url }]);
+
+			expect(result).toEqual([
+				{
+					[field]: {
+						url,
+						...(field === 'video' ? { width: 1270, height: 720 } : {}),
+					},
+				},
+			]);
+		},
+	);
 });
 
 describe('Test Discord > checkAccessToGuild', () => {
